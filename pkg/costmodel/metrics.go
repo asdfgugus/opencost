@@ -12,6 +12,7 @@ import (
 	"github.com/opencost/opencost/core/pkg/util"
 	"github.com/opencost/opencost/core/pkg/util/atomic"
 	"github.com/opencost/opencost/core/pkg/util/promutil"
+	"github.com/opencost/opencost/pkg/carbon"
 	"github.com/opencost/opencost/pkg/cloud/models"
 	"github.com/opencost/opencost/pkg/clustercache"
 	"github.com/opencost/opencost/pkg/env"
@@ -134,6 +135,8 @@ var (
 	networkInternetEgressCostG prometheus.Gauge
 	clusterManagementCostGv    *prometheus.GaugeVec
 	lbCostGv                   *prometheus.GaugeVec
+	nodeCarbonCostGv           *prometheus.GaugeVec
+	diskCarbonCostGv           *prometheus.GaugeVec
 )
 
 // initCostModelMetrics uses a sync.Once to ensure that these metrics are only created once
@@ -273,6 +276,22 @@ func initCostModelMetrics(clusterCache clustercache.ClusterCache, provider model
 			toRegisterGV = append(toRegisterGV, lbCostGv)
 		}
 
+		nodeCarbonCostGv = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "node_carbon_hourly_cost",
+			Help: "node_carbon_hourly_cost Hourly carbon cost per node",
+		}, []string{"instance", "node", "instance_type", "region", "provider_id", "arch"})
+		if _, disabled := disabledMetrics["node_carbon_hourly_cost"]; !disabled {
+			toRegisterGV = append(toRegisterGV, nodeCarbonCostGv)
+		}
+
+		diskCarbonCostGv = prometheus.NewGaugeVec(prometheus.GaugeOpts{ // no differentiation between ELB and ALB right now
+			Name: "disk_carbon_hourly_cost",
+			Help: "disk_carbon_hourly_cost Hourly carbon emission per node",
+		}, []string{"instance", "node", "instance_type", "region", "provider_id", "arch"})
+		if _, disabled := disabledMetrics["disk_carbon_hourly_cost"]; !disabled {
+			toRegisterGV = append(toRegisterGV, diskCarbonCostGv)
+		}
+
 		// Register cost-model metrics for emission
 		for _, gv := range toRegisterGV {
 			prometheus.MustRegister(gv)
@@ -318,6 +337,8 @@ type CostModelMetricsEmitter struct {
 	NetworkZoneEgressRecorder     prometheus.Gauge
 	NetworkRegionEgressRecorder   prometheus.Gauge
 	NetworkInternetEgressRecorder prometheus.Gauge
+	NodeCarbonCostRecorder        *prometheus.GaugeVec
+	DiskCarbonCostRecorder        *prometheus.GaugeVec
 
 	// Concurrent Flow Control - Manages the run state of the metric emitter
 	runState atomic.AtomicRunState
@@ -371,6 +392,8 @@ func NewCostModelMetricsEmitter(promClient promclient.Client, clusterCache clust
 		NetworkInternetEgressRecorder: networkInternetEgressCostG,
 		ClusterManagementCostRecorder: clusterManagementCostGv,
 		LBCostRecorder:                lbCostGv,
+		NodeCarbonCostRecorder:        nodeCarbonCostGv,
+		DiskCarbonCostRecorder:        diskCarbonCostGv,
 	}
 }
 
@@ -568,6 +591,11 @@ func (cmme *CostModelMetricsEmitter) Start() bool {
 					cmme.NodeSpotRecorder.WithLabelValues(nodeName, nodeName, nodeType, nodeRegion, node.ProviderID, node.ArchType).Set(0.0)
 				}
 				nodeSeen[labelKey] = true
+
+				// Carbon cost
+				carbonLookupKeyNode := carbon.GetCarbonLookupKeyNode(nodeType, nodeRegion, node.ProviderID)
+				carbonCoeff := carbonLookupKeyNode.GetCarbonCoeff()
+				cmme.NodeCarbonCostRecorder.WithLabelValues(nodeName, nodeName, nodeType, nodeRegion, node.ProviderID, node.ArchType).Set(carbonCoeff)
 			}
 
 			// TODO: Pass CloudProvider into CostModel on instantiation so this isn't so awkward
